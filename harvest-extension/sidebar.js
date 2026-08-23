@@ -75,7 +75,9 @@ keepButton.addEventListener('click', async () => {
     render('could not keep');
   } finally {
     keeping = false;
-    render();
+    clearButton.disabled = !items.length;
+    keepButton.disabled = !items.length || !destination;
+    destinationSelect.disabled = !destinations.length;
   }
 });
 
