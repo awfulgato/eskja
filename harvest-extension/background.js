@@ -1,17 +1,21 @@
 const SUPABASE_URL = 'https://bshkvgdebluhmuxjpbiw.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_tV6ipeRw37DyNTm2iBl17Q_YmaLScc_';
 const STORAGE_BUCKET = 'board-images';
-const TEST_BOARD = 'segl-test';
+const STORESKJA_BOARD = 'storeskja-husbond';
 const MAX_THING_BYTES = 25 * 1024 * 1024;
 
 let seglActive = false;
 let poki = [];
-const initState = browser.storage.local.get(['seglActive', 'pokiItems']).then(saved => {
+let pokiDestination = '';
+
+const initState = browser.storage.local.get(['seglActive', 'pokiItems', 'pokiDestination']).then(saved => {
   seglActive = !!saved.seglActive;
   poki = Array.isArray(saved.pokiItems) ? saved.pokiItems : [];
+  pokiDestination = typeof saved.pokiDestination === 'string' ? saved.pokiDestination : '';
 }).catch(() => {
   seglActive = false;
   poki = [];
+  pokiDestination = '';
 });
 
 initState.then(() => syncBadge());
@@ -37,13 +41,43 @@ browser.runtime.onMessage.addListener((message, sender) => {
     case 'segl-text':
       return withState(async () => addTextToPoki(message));
     case 'poki-list':
-      return withState(async () => ({ ok: true, active: seglActive, count: poki.length, items: publicPoki() }));
+      return withState(async () => ({
+        ok: true,
+        active: seglActive,
+        count: poki.length,
+        destination: pokiDestination,
+        items: publicPoki()
+      }));
+    case 'poki-destinations':
+      return withState(async () => {
+        const destinations = await listDestinations();
+        await ensureDestination(destinations);
+        return { ok: true, destination: pokiDestination, destinations };
+      });
+    case 'poki-set-destination':
+      return withState(async () => setDestination(message.board));
     case 'poki-remove':
       return withState(async () => removeFromPoki(message.id));
     case 'poki-clear':
       return withState(async () => clearPoki());
     case 'poki-keep':
-      return withState(async () => keepPoki(TEST_BOARD));
+      return withState(async () => {
+        const board = String(message.board || pokiDestination || '').trim();
+        if (!board) {
+          return {
+            ok: false,
+            kept: 0,
+            remaining: poki.length,
+            failures: [{ id: '', type: 'destination', message: 'choose an eskja first' }],
+            active: seglActive,
+            count: poki.length,
+            destination: pokiDestination,
+            items: publicPoki()
+          };
+        }
+        await setDestination(board);
+        return keepPoki(board);
+      });
     default:
       return undefined;
   }
@@ -64,6 +98,67 @@ async function setGlobalActive(next) {
   await broadcastSeglState();
   await syncBadge();
   await notifyPopup();
+}
+
+async function setDestination(board) {
+  const next = String(board || '').trim();
+  if (!next) return { ok: false, destination: pokiDestination };
+  pokiDestination = next;
+  await persistState();
+  await notifyPopup();
+  return { ok: true, destination: pokiDestination };
+}
+
+async function ensureDestination(destinations) {
+  const boards = new Set((destinations || []).map(item => item.board));
+  if (pokiDestination && boards.has(pokiDestination)) return;
+  const clothing = (destinations || []).find(item => item.board === 'husbond-clothing');
+  pokiDestination = clothing?.board || destinations?.[0]?.board || '';
+  await persistState();
+}
+
+async function listDestinations() {
+  const query = new URLSearchParams({
+    select: 'id,target_board,type,text,storage_path,z',
+    board: `eq.${STORESKJA_BOARD}`,
+    target_board: 'not.is.null',
+    order: 'z.asc'
+  });
+
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/board_items?${query.toString()}`, {
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+    }
+  });
+
+  if (!response.ok) throw new Error(`Could not read storeskja (${response.status})`);
+  const rows = await response.json();
+  const seen = new Set();
+  const destinations = [];
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const board = String(row.target_board || '').trim();
+    if (!board || seen.has(board)) continue;
+    seen.add(board);
+    destinations.push({ board, label: destinationLabel(row) });
+  }
+
+  return destinations;
+}
+
+function destinationLabel(row) {
+  const text = String(row.text || '').replace(/\s+/g, ' ').trim();
+  if (text) return text.length > 42 ? `${text.slice(0, 41)}…` : text;
+
+  const path = String(row.storage_path || '');
+  if (path) {
+    const filename = path.split('/').filter(Boolean).pop() || '';
+    const clean = filename.replace(/\.[^.]+$/, '').trim();
+    if (clean) return clean;
+  }
+
+  return row.type === 'audio' ? 'audio' : row.type === 'video' ? 'video' : row.type === 'image' ? 'image' : 'eskja';
 }
 
 async function addImageToPoki(message, sender) {
@@ -116,7 +211,7 @@ async function removeFromPoki(id) {
     await syncBadge();
     await notifyPopup();
   }
-  return { ok: true, active: seglActive, count: poki.length, items: publicPoki() };
+  return { ok: true, active: seglActive, count: poki.length, destination: pokiDestination, items: publicPoki() };
 }
 
 async function clearPoki() {
@@ -126,7 +221,7 @@ async function clearPoki() {
     await syncBadge();
     await notifyPopup();
   }
-  return { ok: true, active: seglActive, count: poki.length, items: publicPoki() };
+  return { ok: true, active: seglActive, count: poki.length, destination: pokiDestination, items: publicPoki() };
 }
 
 async function keepPoki(board) {
@@ -160,6 +255,7 @@ async function keepPoki(board) {
     failures,
     active: seglActive,
     count: poki.length,
+    destination: pokiDestination,
     items: publicPoki()
   };
 }
@@ -193,9 +289,7 @@ async function keepImageItem(item, board) {
     } catch (_) {}
   }
 
-  if (!acquired) {
-    acquired = await captureStoredImage(item);
-  }
+  if (!acquired) acquired = await captureStoredImage(item);
 
   if (!acquired?.blob || acquired.blob.size === 0 || acquired.blob.size > MAX_THING_BYTES) {
     throw new Error('unharvestable');
@@ -221,21 +315,48 @@ async function keepImageItem(item, board) {
 
 async function broadcastSeglState() {
   const tabs = await browser.tabs.query({});
-  await Promise.all(tabs.map(tab => tab?.id ? browser.tabs.sendMessage(tab.id, { type: 'segl-set-active', active: seglActive }).catch(() => {}) : Promise.resolve()));
+  await Promise.all(tabs.map(tab => tab?.id
+    ? browser.tabs.sendMessage(tab.id, { type: 'segl-set-active', active: seglActive }).catch(() => {})
+    : Promise.resolve()));
 }
 
 async function notifyPopup() {
-  await browser.runtime.sendMessage({ type: 'poki-changed', active: seglActive, count: poki.length }).catch(() => {});
+  await browser.runtime.sendMessage({
+    type: 'poki-changed',
+    active: seglActive,
+    count: poki.length,
+    destination: pokiDestination
+  }).catch(() => {});
 }
 
 async function persistState() {
-  await browser.storage.local.set({ seglActive, pokiItems: poki });
+  await browser.storage.local.set({
+    seglActive,
+    pokiItems: poki,
+    pokiDestination
+  });
 }
 
 function publicPoki() {
   return poki.map(item => item.type === 'text'
-    ? { id: item.id, type: 'text', text: item.text, pageUrl: item.pageUrl, pageTitle: item.pageTitle, createdAt: item.createdAt }
-    : { id: item.id, type: 'image', pageUrl: item.pageUrl, pageTitle: item.pageTitle, naturalWidth: item.naturalWidth, naturalHeight: item.naturalHeight, candidateCount: Array.isArray(item.candidates) ? item.candidates.length : 0, createdAt: item.createdAt }
+    ? {
+        id: item.id,
+        type: 'text',
+        text: item.text,
+        pageUrl: item.pageUrl,
+        pageTitle: item.pageTitle,
+        createdAt: item.createdAt
+      }
+    : {
+        id: item.id,
+        type: 'image',
+        pageUrl: item.pageUrl,
+        pageTitle: item.pageTitle,
+        naturalWidth: item.naturalWidth,
+        naturalHeight: item.naturalHeight,
+        candidateCount: Array.isArray(item.candidates) ? item.candidates.length : 0,
+        createdAt: item.createdAt
+      }
   );
 }
 
@@ -337,7 +458,14 @@ async function captureStoredImage(item) {
   const ctx = canvas.getContext('2d');
   ctx.drawImage(image, sx, sy, sw, sh, 0, 0, sw, sh);
   const blob = await canvasToBlob(canvas, 'image/png');
-  return { blob, method: 'visual-capture', filename: `segl-${Date.now()}.png`, width: sw, height: sh, sourceUrl: item.candidates?.[0]?.url || '' };
+  return {
+    blob,
+    method: 'visual-capture',
+    filename: `segl-${Date.now()}.png`,
+    width: sw,
+    height: sh,
+    sourceUrl: item.candidates?.[0]?.url || ''
+  };
 }
 
 async function persistImage(item) {
@@ -409,7 +537,10 @@ async function deleteStorageObject(storagePath) {
   const objectUrl = `${SUPABASE_URL}/storage/v1/object/${encodePath(STORAGE_BUCKET)}/${encodePath(storagePath)}`;
   await fetch(objectUrl, {
     method: 'DELETE',
-    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` }
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+    }
   });
 }
 
@@ -444,7 +575,14 @@ function filenameFromUrl(url, mime) {
 function extensionFor(filename, mime) {
   const match = String(filename || '').match(/\.([a-z0-9]{2,5})$/i);
   if (match) return match[1].toLowerCase().replace('jpeg', 'jpg');
-  const map = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp', 'image/avif': 'avif', 'image/svg+xml': 'svg' };
+  const map = {
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/gif': 'gif',
+    'image/webp': 'webp',
+    'image/avif': 'avif',
+    'image/svg+xml': 'svg'
+  };
   return map[mime] || 'png';
 }
 
