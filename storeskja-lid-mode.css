@@ -20,18 +20,21 @@
 
 .lid-mode-toggle {
   position: absolute;
-  top: -17px;
-  right: -1px;
+  /* The hit area overlaps the lid by a few pixels so there is no dead
+     hover gap between doorway and edit affordance. */
+  top: -13px;
+  right: -3px;
   z-index: 3;
   display: none;
-  width: 15px;
-  height: 15px;
+  width: 19px;
+  height: 19px;
   margin: 0;
-  padding: 0;
+  padding: 2px;
   border: 0;
   background: transparent;
   color: #555;
   cursor: var(--eskja-open-hand, default);
+  pointer-events: auto;
 }
 
 .lid-mode-toggle svg {
@@ -45,7 +48,8 @@
   stroke-linejoin: round;
 }
 
-.storeskja-lid:hover:not(.lid-edit-mode):not(.editing) > .lid-mode-toggle {
+.storeskja-lid:hover:not(.lid-edit-mode):not(.editing) > .lid-mode-toggle,
+.lid-mode-toggle:hover {
   display: block;
 }
 
